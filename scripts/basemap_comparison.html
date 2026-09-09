@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · 真实地图对比</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+body{margin:0;background:#f4f7fa;color:#182e43;font:15px/1.5 system-ui,sans-serif}
+header{padding:18px 24px 12px}h1{font-size:22px;margin:0 0 8px}p{margin:7px 0}
+.controls{display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:12px}
+button{padding:5px 12px;font:inherit;cursor:pointer;background:white;border:1px solid #bcc9d5;border-radius:5px}
+main{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:0 16px}
+section{border:1px solid #ccd6df;border-radius:6px;overflow:hidden;background:white}
+h2{font-size:15px;margin:0;padding:10px 14px}.map{height:66vh;min-height:360px}
+footer{padding:12px 24px;font-size:13px;color:#53697c}#status{font-size:14px;color:#53697c}
+.leaflet-container{font:13px system-ui,sans-serif}label{white-space:nowrap}
+@media(max-width:900px){main{grid-template-columns:1fr}.map{height:55vh}}
+</style>
+<header><h1>__TITLE__ · 真实地图对比</h1>
+<p>左：输入轨迹；中：生成路网；右：生成路网与历史 OSM 参考路网叠加。缩放和平移同步。</p>
+<div class="controls"><button id="fit">显示全部数据</button>
+<label><input id="tracks" type="checkbox" checked> 灰色轨迹（左图）</label>
+<label><input id="generated" type="checkbox" checked> 橙色生成路网</label>
+<label><input id="reference" type="checkbox" checked> 蓝色参考路网（右图）</label>
+<label><input id="tiles" type="checkbox" checked> 真实街道底图</label></div>
+<p id="status" role="status">正在载入地图组件；需要联网访问底图和组件 CDN。</p></header>
+<main><section><h2>GPS 轨迹</h2><div class="map" id="map-tracks"></div></section>
+<section><h2>生成路网</h2><div class="map" id="map-generated"></div></section>
+<section><h2>生成路网 + OSM 参考路网</h2><div class="map" id="map-overlay"></div></section></main>
+<footer>底图 © OpenStreetMap contributors。仓库参考路网与在线底图年代不同；当前显示完整数据范围，不等同于评价 bounding box。
+轨迹显示原始采样点间的连线。道路不显示通行方向。底图瓦片按可见范围加载，不作批量下载。</footer>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/proj4@2.12.1/dist/proj4.js"></script>
+<script id="map-data" type="application/json">__DATA__</script>
+<script>
+(() => {
+const status=document.getElementById('status');
+if(!window.L||!window.proj4){status.textContent='地图组件载入失败，请联网后刷新。离线对比可使用 comparison.html。';return;}
+try {
+const data=JSON.parse(document.getElementById('map-data').textContent);
+proj4.defs('EPSG:2100','+proj=tmerc +lat_0=0 +lon_0=24 +k=0.9996 +x_0=500000 +y_0=0 +ellps=GRS80 +towgs84=-199.87,74.79,246.62,0,0,0,0 +units=m +no_defs');
+const transform=proj4(data.crs,'EPSG:4326');
+const convert=lines=>lines.map(line=>line.map(p=>{const [lng,lat]=transform.forward(p);
+if(!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>85||Math.abs(lng)>180)throw Error('坐标转换结果超出范围');
+return [lat,lng];}));
+const tracks=convert(data.tracks),generated=convert(data.generated),reference=convert(data.reference);
+const bounds=L.latLngBounds([...tracks,...generated,...reference].flat());
+const maps=['map-tracks','map-generated','map-overlay'].map(id=>L.map(id,{preferCanvas:true,zoomSnap:0.25}));
+const tiles=maps.map(map=>L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
+maxZoom:19,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map));
+tiles.forEach(t=>t.on('tileerror',()=>status.textContent='底图瓦片载入失败；轨迹和路网仍可查看。请检查网络后刷新。'));
+const trackLayer=L.polyline(tracks,{color:'#526979',weight:2,opacity:.5}).addTo(maps[0]);
+const referenceLayer=L.polyline(reference,{color:'#1479ce',weight:4,opacity:.75}).addTo(maps[2]);
+const genLayers=[1,2].map(i=>L.polyline(generated,{color:'#ed5721',weight:2.5,opacity:.95}).addTo(maps[i]));
+maps.forEach(m=>L.control.scale({imperial:false}).addTo(m));
+let updating=false;
+maps.forEach(source=>source.on('move',()=>{if(updating)return;updating=true;
+try{maps.forEach(target=>{if(target!==source)target.setView(source.getCenter(),source.getZoom(),{animate:false});});}
+finally{updating=false;}}));
+function fit(){maps[0].fitBounds(bounds,{padding:[20,20],animate:false});}
+document.getElementById('fit').onclick=fit;
+function toggle(id,pairs){document.getElementById(id).onchange=e=>pairs.forEach(([map,layer])=>e.target.checked?map.addLayer(layer):map.removeLayer(layer));}
+toggle('tracks',[[maps[0],trackLayer]]);toggle('reference',[[maps[2],referenceLayer]]);
+toggle('generated',genLayers.map((layer,i)=>[maps[i+1],layer]));toggle('tiles',tiles.map((layer,i)=>[maps[i],layer]));
+fit();
+status.textContent=`${data.tracks.length} 条轨迹 · ${data.generated.length} 条生成边 · ${data.reference.length} 条参考边 · ${data.crs} → WGS84`;
+}catch(error){status.textContent='无法显示地图：'+error.message;}
+})();
+</script></html>
